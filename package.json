@@ -1,6 +1,6 @@
 {
   "name": "google-translate-universal",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Universal Google Translate API wrapper that works with any web framework",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -58,35 +58,67 @@ logger.on((level, ...args) => {
   console.log(`[${level.toUpperCase()}]`, ...args)
 })
 
-// 高级日志处理
-logger.on((level, ...args) => {
-  const timestamp = new Date().toISOString()
-  const message = args.join(' ')
-  
-  // 根据级别处理不同日志
-  switch (level) {
-    case 'error':
-      // 发送错误到监控系统
-      sendToErrorTracking({ level, message, timestamp })
-      break
-    case 'warn':
-      // 记录警告日志
-      console.warn(`⚠️  [${timestamp}]`, message)
-      break
-    case 'info':
-      // 记录信息日志（仅在详细模式下）
-      if (process.env.VERBOSE) {
-        console.info(`ℹ️  [${timestamp}]`, message)
-      }
-      break
-  }
-})
-
 // 现在所有翻译过程中的日志都会被捕获
 const result = await translate('Hello', { 
   from: 'en', 
   to: 'zh', 
   verbose: true // 启用详细日志
+})
+```
+
+**高级日志处理示例：**
+
+```typescript
+// 根据日志级别处理不同的日志
+logger.on((level, ...args) => {
+  const timestamp = new Date().toISOString()
+  const message = args.join(' ')
+  
+  switch (level) {
+    case 'error':
+      console.error(`🚨 [${timestamp}] [ERROR]`, message)
+      break
+    case 'warn':
+      console.warn(`⚠️  [${timestamp}] [WARN]`, message)
+      break
+    case 'info':
+      console.info(`ℹ️  [${timestamp}] [INFO]`, message)
+      break
+  }
+})
+```
+
+**Logger 方法说明：**
+
+```typescript
+// 日志监听器管理
+logger.on(callback)              // 添加日志监听器
+logger.off(callback)             // 移除指定监听器
+logger.removeAllListeners()      // 清除所有监听器
+logger.listenerCount()           // 获取当前监听器数量
+
+// 手动发送日志
+logger.info('这是一条信息')
+logger.warn('这是一条警告')
+logger.error('这是一条错误')
+```
+
+**防止内存泄漏（可选）：**
+
+```typescript
+// 保存监听器引用，方便后续清理
+const logHandler = (level, ...args) => {
+  console.log(`[翻译] [${level}]`, ...args)
+}
+
+logger.on(logHandler)
+
+// 使用完毕后清理
+logger.off(logHandler)
+
+// 或者程序退出时清理所有监听器
+process.on('exit', () => {
+  logger.removeAllListeners()
 })
 ```
 
@@ -116,8 +148,14 @@ const app = new Hono()
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN
 
 // 设置日志监听（可选）
-logger.on((level, ...args) => {
-  console.log(`[${level.toUpperCase()}]`, ...args)
+const logHandler = (level, ...args) => {
+  console.log(`[翻译日志] [${level.toUpperCase()}]`, ...args)
+}
+logger.on(logHandler)
+
+// 程序退出时清理日志监听器
+process.on('exit', () => {
+  logger.off(logHandler)
 })
 
 // CORS 中间件
@@ -127,7 +165,7 @@ app.use('*', async (c, next) => {
     c.header(key, value)
   })
   
-  if (c.req.method !== 'GET' && c.req.method !== 'POST') {
+  if (!['GET', 'POST'].includes(c.req.method)) {
     return c.text('Method Not Allowed', 405)
   }
   await next()
@@ -147,13 +185,31 @@ app.get('/health', (c) => {
 
 // 翻译接口
 app.all('/translate', async (c) => {
-  const params = c.req.method === 'GET' 
-    ? Object.fromEntries(c.req.queries().entries())
-    : await c.req.json()
+  let params = {}
   
-  const headers = { authorization: c.req.header('Authorization') }
+  if (c.req.method === 'GET') {
+    // GET 请求：所有参数包括 token 都从 query 获取
+    params = {
+      text: c.req.query('text'),
+      source_lang: c.req.query('source_lang'),
+      target_lang: c.req.query('target_lang'),
+      token: c.req.query('token')
+    }
+  } else if (c.req.method === 'POST') {
+    // POST 请求：业务参数从 body 获取，token 从 query 获取
+    const { text, source_lang, target_lang } = await c.req.json()
+
+    params = {
+      text,
+      source_lang,
+      target_lang,
+      token: c.req.query('token')  // POST 的 token 也从 query 获取
+    }
+  }
+  
+  const headers = c.req.method === 'POST' ? { authorization: c.req.header('Authorization') } : {}
   const result = await handleTranslateRequest(params, headers, ACCESS_TOKEN, { verbose: true })
-  
+
   return c.json(result, result.code === 200 ? 200 : 500)
 })
 
@@ -176,8 +232,14 @@ const app = express()
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN
 
 // 设置日志监听（可选）
-logger.on((level, ...args) => {
-  console.log(`[${new Date().toISOString()}] [${level.toUpperCase()}]`, ...args)
+const logHandler = (level, ...args) => {
+  console.log(`[翻译日志] [${level.toUpperCase()}]`, ...args)
+}
+logger.on(logHandler)
+
+// 程序退出时清理日志监听器
+process.on('exit', () => {
+  logger.off(logHandler)
 })
 
 app.use(express.json())
@@ -189,7 +251,7 @@ app.use((req, res, next) => {
     res.header(key, value)
   })
   
-  if (req.method !== 'GET' && req.method !== 'POST') {
+  if (!['GET', 'POST'].includes(req.method)) {
     return res.status(405).send('Method Not Allowed')
   }
   next()
@@ -209,8 +271,31 @@ app.get('/health', (req, res) => {
 
 // 翻译接口
 app.all('/translate', async (req, res) => {
-  const params = req.method === 'GET' ? req.query : req.body
-  const headers = { authorization: req.headers.authorization }
+  let params = {}
+  
+  if (req.method === 'GET') {
+    // GET 请求：所有参数包括 token 都从 query 获取
+    const { text, source_lang, target_lang, token } = req.query
+
+    params = {
+      text,
+      source_lang,
+      target_lang,
+      token
+    }
+  } else if (req.method === 'POST') {
+    // POST 请求：业务参数从 body 获取，token 从 query 获取
+    const { text, source_lang, target_lang } = req.body
+
+    params = {
+      text,
+      source_lang,
+      target_lang,
+      token: req.query.token  // POST 的 token 也从 query 获取
+    }
+  }
+  
+  const headers = req.method === 'POST' ? { authorization: req.headers.authorization } : {}
   const result = await handleTranslateRequest(params, headers, ACCESS_TOKEN, { verbose: true })
   
   return res.status(result.code === 200 ? 200 : 500).json(result)
@@ -241,8 +326,14 @@ const router = new Router()
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN
 
 // 设置日志监听（可选）
-logger.on((level, ...args) => {
-  console.log(`[${level.toUpperCase()}]`, ...args)
+const logHandler = (level, ...args) => {
+  console.log(`[翻译日志] [${level.toUpperCase()}]`, ...args)
+}
+logger.on(logHandler)
+
+// 程序退出时清理日志监听器
+process.on('exit', () => {
+  logger.off(logHandler)
 })
 
 app.use(bodyParser())
@@ -254,7 +345,7 @@ app.use(async (ctx, next) => {
     ctx.set(key, value)
   })
   
-  if (ctx.method !== 'GET' && ctx.method !== 'POST') {
+  if (!['GET', 'POST'].includes(ctx.method)) {
     ctx.status = 405
     ctx.body = 'Method Not Allowed'
     return
@@ -276,8 +367,31 @@ router.get('/health', (ctx) => {
 
 // 翻译接口
 router.all('/translate', async (ctx) => {
-  const params = ctx.method === 'GET' ? ctx.query : ctx.request.body
-  const headers = { authorization: ctx.headers.authorization }
+  let params = {}
+  
+  if (ctx.method === 'GET') {
+    // GET 请求：所有参数包括 token 都从 query 获取
+    const { text, source_lang, target_lang, token } = ctx.query
+
+    params = {
+      text,
+      source_lang,
+      target_lang,
+      token
+    }
+  } else if (ctx.method === 'POST') {
+    // POST 请求：业务参数从 body 获取，token 从 query 获取
+    const { text, source_lang, target_lang } = ctx.request.body
+
+    params = {
+      text,
+      source_lang,
+      target_lang,
+      token: ctx.query.token  // POST 的 token 也从 query 获取
+    }
+  }
+  
+  const headers = ctx.method === 'POST' ? { authorization: ctx.headers.authorization } : {}
   const result = await handleTranslateRequest(params, headers, ACCESS_TOKEN, { verbose: true })
   
   ctx.status = result.code === 200 ? 200 : 500
@@ -309,8 +423,20 @@ const fastify = Fastify({ logger: true })
 const ACCESS_TOKEN = process.env.ACCESS_TOKEN
 
 // 设置日志监听（可选）
-logger.on((level, ...args) => {
-  fastify.log[level](...args)
+const logHandler = (level, ...args) => {
+  // 使用 fastify 原生日志系统，性能更好且支持结构化日志
+  if (fastify.log[level]) {
+    fastify.log[level]('[翻译日志]', ...args)
+  } else {
+    // 如果日志级别不存在，回退到 info 级别
+    fastify.log.info(`[翻译日志] [${level.toUpperCase()}]`, ...args)
+  }
+}
+logger.on(logHandler)
+
+// 程序退出时清理日志监听器
+process.on('exit', () => {
+  logger.off(logHandler)
 })
 
 // CORS 插件
@@ -336,8 +462,31 @@ fastify.route({
   method: ['GET', 'POST'],
   url: '/translate',
   handler: async (request, reply) => {
-    const params = request.method === 'GET' ? request.query : request.body
-    const headers = { authorization: request.headers.authorization }
+    let params = {}
+    
+    if (request.method === 'GET') {
+      // GET 请求：所有参数包括 token 都从 query 获取
+      const { text, source_lang, target_lang, token } = request.query
+
+      params = {
+        text,
+        source_lang,
+        target_lang,
+        token
+      }
+    } else if (request.method === 'POST') {
+      // POST 请求：业务参数从 body 获取，token 从 query 获取
+      const { text, source_lang, target_lang } = request.body
+
+      params = {
+        text,
+        source_lang,
+        target_lang,
+        token: request.query.token  // POST 的 token 也从 query 获取
+      }
+    }
+    
+    const headers = request.method === 'POST' ? { authorization: request.headers.authorization } : {}
     const result = await handleTranslateRequest(params, headers, ACCESS_TOKEN, { verbose: true })
     
     reply.status(result.code === 200 ? 200 : 500)
@@ -530,87 +679,43 @@ const headers = {
 const result = await handleTranslateRequest(params, headers, 'your-access-token')
 ```
 
-### 5. 集成日志系统
 
-完整的日志系统集成示例：
+#### Logger 类新增方法：
 
 ```typescript
-import { logger, translate } from 'google-translate-universal'
+// 日志监听器管理
+logger.on(callback)              // 添加日志监听器
+logger.off(callback)             // 移除指定监听器
+logger.removeAllListeners()      // 清除所有监听器
+logger.listenerCount()           // 获取当前监听器数量
 
-// 创建自定义日志处理器
-class TranslateLogger {
-  constructor() {
-    this.setupLogger()
-  }
+// 日志发送方法
+logger.info('信息日志')           // 发送 info 级别日志
+logger.warn('警告日志')           // 发送 warn 级别日志
+logger.error('错误日志')          // 发送 error 级别日志
+```
 
-  setupLogger() {
-    logger.on((level, ...args) => {
-      const timestamp = new Date().toISOString()
-      const message = args.join(' ')
-      
-      // 格式化日志
-      const logEntry = {
-        timestamp,
-        level,
-        message,
-        service: 'google-translate'
-      }
-      
-      // 发送到不同的日志系统
-      switch (level) {
-        case 'error':
-          this.handleError(logEntry)
-          break
-        case 'warn':
-          this.handleWarning(logEntry)
-          break
-        case 'info':
-          this.handleInfo(logEntry)
-          break
-      }
-    })
-  }
+#### 防止内存泄漏的最佳实践：
 
-  handleError(logEntry) {
-    // 发送到错误监控系统（如 Sentry）
-    console.error('🚨', logEntry.message)
-    // Sentry.captureMessage(logEntry.message, 'error')
-  }
+```typescript
+// 方法1：单个监听器清理
+const logHandler = (level, ...args) => {
+  console.log(`[${level}]`, ...args);
+};
 
-  handleWarning(logEntry) {
-    // 发送到日志聚合系统
-    console.warn('⚠️ ', logEntry.message)
-    // logAggregator.send(logEntry)
-  }
+logger.on(logHandler);
+// 使用完后清理
+logger.off(logHandler);
 
-  handleInfo(logEntry) {
-    // 仅在开发环境输出
-    if (process.env.NODE_ENV === 'development') {
-      console.info('ℹ️ ', logEntry.message)
-    }
-    // 发送到分析系统
-    // analytics.track('translate_info', logEntry)
-  }
+// 方法2：程序退出时清理所有监听器
+process.on('exit', () => {
+  logger.removeAllListeners();
+});
+
+// 方法3：检查监听器数量，避免重复添加
+if (logger.listenerCount() === 0) {
+  logger.on(myHandler);
 }
-
-// 初始化日志系统
-const translateLogger = new TranslateLogger()
-
-// 使用翻译功能，所有日志都会被自动捕获和处理
-async function translateWithLogging(text, options) {
-  try {
-    console.log('开始翻译...')
-    const result = await translate(text, { ...options, verbose: true })
-    console.log('翻译完成:', result.text)
-    return result
-  } catch (error) {
-    console.error('翻译失败:', error.message)
-    throw error
-  }
-}
-
-// 使用示例
-translateWithLogging('Hello World', { from: 'en', to: 'zh' })
 ```
 
 **完整日志输出示例：**

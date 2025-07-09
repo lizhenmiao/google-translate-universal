@@ -16,6 +16,33 @@ class Logger {
   }
 
   /**
+   * 移除指定的日志监听器
+   * @param callback 要移除的监听器函数
+   */
+  off(callback: (level: string, ...args: any[]) => void) {
+    const index = this.listeners.indexOf(callback);
+    if (index > -1) {
+      this.listeners.splice(index, 1);
+    }
+  }
+
+  /**
+   * 清除所有日志监听器
+   * 用于程序退出时清理资源，防止内存泄漏
+   */
+  removeAllListeners() {
+    this.listeners = [];
+  }
+
+  /**
+   * 获取当前监听器数量
+   * @returns 监听器数量
+   */
+  listenerCount(): number {
+    return this.listeners.length;
+  }
+
+  /**
    * 通用的日志处理方法
    * 通知所有监听器，传递日志级别和参数
    * @param level 日志级别

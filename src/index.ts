@@ -7,7 +7,6 @@ export { logger } from './utils.js'
 export { translate } from './translate.js'
 export { 
   getCorsHeaders,
-  parseTranslateParams,
   getApiDoc,
   getHealthCheck,
   handleTranslateRequest
