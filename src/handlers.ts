@@ -149,7 +149,7 @@ export async function handleTranslateRequest(
     const googleResult = await translate(text, {
       from: source_lang,
       to: target_lang,
-      verbose,
+      ...options,
     });
 
     // 返回标准格式的成功响应
