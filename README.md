@@ -18,6 +18,23 @@
 npm install google-translate-universal
 ```
 
+## 🐧 Linux 一键部署
+
+如果你想在 Linux 服务器上快速部署翻译服务，可以使用我们提供的一键安装脚本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lizhenmiao/google-translate-universal/master/linux-deploy/install.sh | sudo bash
+```
+
+详细说明请查看：[Linux 部署指南](./linux-deploy/INSTALL_GUIDE.md)
+
+### 📁 目录说明
+
+- **`/linux-deploy/`** - Linux 服务器一键部署相关文件
+  - `install.sh` - 交互式安装管理脚本
+  - `translate-service.js` - Fastify 生产环境服务
+  - `INSTALL_GUIDE.md` - 详细安装使用指南
+
 ## 🚀 快速开始
 
 ### 1. 纯函数使用（推荐）
