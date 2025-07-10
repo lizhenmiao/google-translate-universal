@@ -14,6 +14,11 @@ LOGROTATE_FILE="/etc/logrotate.d/${APP_NAME}"
 SCRIPT_VERSION="1.0.0"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/lizhenmiao/google-translate-universal/master/linux-deploy"
 
+# 语言配置
+LANG_CN="cn"
+LANG_EN="en"
+CURRENT_LANG="${LANG_CN}"
+
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -22,6 +27,72 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# 多语言支持
+get_text() {
+    local key="$1"
+    case "$key" in
+        "banner_title")
+            if [ "$CURRENT_LANG" = "$LANG_EN" ]; then
+                echo "Google Translation Service Management Tool"
+            else
+                echo "Google翻译服务管理工具"
+            fi
+            ;;
+        "banner_version")
+            if [ "$CURRENT_LANG" = "$LANG_EN" ]; then
+                echo "Version: ${SCRIPT_VERSION}"
+            else
+                echo "版本: ${SCRIPT_VERSION}"
+            fi
+            ;;
+        "banner_author")
+            if [ "$CURRENT_LANG" = "$LANG_EN" ]; then
+                echo "Author: lizhenmiao"
+            else
+                echo "作者: lizhenmiao"
+            fi
+            ;;
+        "service_status")
+            if [ "$CURRENT_LANG" = "$LANG_EN" ]; then
+                echo "Service Status:"
+            else
+                echo "服务状态:"
+            fi
+            ;;
+        "running")
+            if [ "$CURRENT_LANG" = "$LANG_EN" ]; then
+                echo "Running"
+            else
+                echo "运行中"
+            fi
+            ;;
+        "stopped")
+            if [ "$CURRENT_LANG" = "$LANG_EN" ]; then
+                echo "Stopped"
+            else
+                echo "已停止"
+            fi
+            ;;
+        "port_listening")
+            if [ "$CURRENT_LANG" = "$LANG_EN" ]; then
+                echo "Port Listening Status:"
+            else
+                echo "端口监听状态:"
+            fi
+            ;;
+        "service_management")
+            if [ "$CURRENT_LANG" = "$LANG_EN" ]; then
+                echo "Service Management:"
+            else
+                echo "服务管理:"
+            fi
+            ;;
+        *)
+            echo "$key"
+            ;;
+    esac
+}
 
 # 日志函数
 log_info() {
@@ -44,11 +115,9 @@ log_success() {
 show_banner() {
     clear
     echo -e "${PURPLE}"
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║                    Google翻译服务管理工具                    ║"
-    echo "║                         版本: ${SCRIPT_VERSION}              ║"
-    echo "║                       作者: lizhenmiao                       ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo "$(get_text 'banner_title')"
+    echo "$(get_text 'banner_version')"
+    echo "$(get_text 'banner_author')"
     echo -e "${NC}"
     echo
 }
@@ -510,24 +579,46 @@ check_service_status() {
 
 # 显示服务状态
 show_service_status() {
+    # 获取端口号
+    local current_port=""
+    if [ -f "$APP_DIR/.env" ]; then
+        current_port=$(grep "^PORT=" "$APP_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    fi
+    current_port=${current_port:-3000}
+    
     echo
-    log_info "服务状态信息:"
+    log_info "$(get_text 'service_status')"
     
     if [ "$INIT_SYSTEM" = "openrc" ]; then
-        rc-service $APP_NAME status
+        if rc-service $APP_NAME status 2>/dev/null; then
+            echo " * 状态: $(get_text 'running')"
+        else
+            echo " * 状态: $(get_text 'stopped')"
+        fi
     elif [ "$INIT_SYSTEM" = "systemd" ]; then
-        systemctl status $APP_NAME --no-pager -l
+        if systemctl is-active --quiet $APP_NAME 2>/dev/null; then
+            echo " * 状态: $(get_text 'running')"
+            echo " * 开机自启: $(systemctl is-enabled $APP_NAME 2>/dev/null || echo '未启用')"
+        else
+            echo " * 状态: $(get_text 'stopped')"
+        fi
     fi
     
     echo
     
-    log_info "端口监听状态:"
+    log_info "$(get_text 'port_listening')"
+    local port_status=""
     if command -v netstat &> /dev/null; then
-        netstat -tlnp | grep ":$PORT " || echo "端口 $PORT 未监听"
+        port_status=$(netstat -tlnp 2>/dev/null | grep ":$current_port ")
     elif command -v ss &> /dev/null; then
-        ss -tlnp | grep ":$PORT " || echo "端口 $PORT 未监听"
+        port_status=$(ss -tlnp 2>/dev/null | grep ":$current_port ")
+    fi
+    
+    if [ -n "$port_status" ]; then
+        echo "端口 $current_port 正在监听"
+        echo "$port_status"
     else
-        log_warn "无法检查端口状态"
+        echo "端口 $current_port 未监听"
     fi
 }
 
@@ -542,10 +633,10 @@ show_logs() {
     echo "2) 昨天的日志"
     echo "3) 系统服务日志"
     echo "4) 实时日志"
-    echo "5) 返回主菜单"
+    echo "0) 返回主菜单"
     echo
     
-    read -p "请选择 [1-5]: " choice
+    read -p "请选择 [0-4]: " choice
     
     case $choice in
         1)
@@ -584,7 +675,7 @@ show_logs() {
             fi
             return
             ;;
-        5)
+        0)
             return
             ;;
         *)
@@ -621,13 +712,13 @@ service_management() {
         clear
         show_banner
         
-        echo "服务管理:"
+        echo "$(get_text 'service_management')"
         echo
         
         if check_service_status; then
-            echo -e "服务状态: ${GREEN}运行中${NC}"
+            echo -e "$(get_text 'service_status') ${GREEN}$(get_text 'running')${NC}"
         else
-            echo -e "服务状态: ${RED}已停止${NC}"
+            echo -e "$(get_text 'service_status') ${RED}$(get_text 'stopped')${NC}"
         fi
         
         echo
@@ -639,10 +730,10 @@ service_management() {
         echo "6) 启用开机自启"
         echo "7) 禁用开机自启"
         echo "8) 卸载服务"
-        echo "9) 返回主菜单"
+        echo "0) 返回主菜单"
         echo
         
-        read -p "请选择 [1-9]: " choice
+        read -p "请选择 [0-8]: " choice
         
         case $choice in
             1)
@@ -741,7 +832,7 @@ service_management() {
                 uninstall_service
                 return
                 ;;
-            9)
+            0)
                 return
                 ;;
             *)
@@ -844,6 +935,56 @@ health_check() {
     read -p "按Enter键继续..." -r
 }
 
+# 切换语言
+switch_language() {
+    echo
+    if [ "$CURRENT_LANG" = "$LANG_CN" ]; then
+        echo "当前语言: 中文"
+        echo "Current Language: Chinese"
+        echo
+        echo "1) 保持中文 / Keep Chinese"
+        echo "2) 切换到英文 / Switch to English"
+        echo "0) 返回主菜单 / Return to Main Menu"
+    else
+        echo "当前语言: 英文"
+        echo "Current Language: English"
+        echo
+        echo "1) 切换到中文 / Switch to Chinese"
+        echo "2) 保持英文 / Keep English"
+        echo "0) 返回主菜单 / Return to Main Menu"
+    fi
+    echo
+    
+    read -p "请选择 / Please select [0-2]: " choice
+    
+    case $choice in
+        1)
+            if [ "$CURRENT_LANG" = "$LANG_EN" ]; then
+                CURRENT_LANG="$LANG_CN"
+                log_success "语言已切换为中文"
+            else
+                log_success "继续使用中文 / Continue using Chinese"
+            fi
+            ;;
+        2)
+            if [ "$CURRENT_LANG" = "$LANG_CN" ]; then
+                CURRENT_LANG="$LANG_EN"
+                log_success "Language switched to English"
+            else
+                log_success "继续使用英文 / Continue using English"
+            fi
+            ;;
+        0)
+            return
+            ;;
+        *)
+            log_error "无效选择 / Invalid choice"
+            ;;
+    esac
+    
+    read -p "按Enter键继续... / Press Enter to continue..." -r
+}
+
 # 主菜单
 main_menu() {
     while true; do
@@ -854,12 +995,13 @@ main_menu() {
         echo
         
         if [ -f "$SERVICE_FILE" ] || [ -f "/etc/init.d/$APP_NAME" ]; then
-            echo "1) 服务管理"
-            echo "2) 健康检查"
-            echo "3) 重新安装"
-            echo "4) 退出"
+            echo "1) 服务管理 / Service Management"
+            echo "2) 健康检查 / Health Check"
+            echo "3) 重新安装 / Reinstall"
+            echo "4) 切换语言 / Switch Language"
+            echo "0) 退出脚本 / Exit Script"
             echo
-            read -p "请选择 [1-4]: " choice
+            read -p "请选择 / Please select [0-4]: " choice
             
             case $choice in
                 1)
@@ -872,31 +1014,38 @@ main_menu() {
                     install_service
                     ;;
                 4)
-                    log_info "退出脚本"
+                    switch_language
+                    ;;
+                0)
+                    log_info "退出脚本 / Exit script"
                     exit 0
                     ;;
                 *)
-                    log_error "无效选择"
-                    read -p "按Enter键继续..." -r
+                    log_error "无效选择 / Invalid choice"
+                    read -p "按Enter键继续... / Press Enter to continue..." -r
                     ;;
             esac
         else
-            echo "1) 安装翻译服务"
-            echo "2) 退出"
+            echo "1) 安装翻译服务 / Install Translation Service"
+            echo "2) 切换语言 / Switch Language"
+            echo "0) 退出脚本 / Exit Script"
             echo
-            read -p "请选择 [1-2]: " choice
+            read -p "请选择 / Please select [0-2]: " choice
             
             case $choice in
                 1)
                     install_service
                     ;;
                 2)
-                    log_info "退出脚本"
+                    switch_language
+                    ;;
+                0)
+                    log_info "退出脚本 / Exit script"
                     exit 0
                     ;;
                 *)
-                    log_error "无效选择"
-                    read -p "按Enter键继续..." -r
+                    log_error "无效选择 / Invalid choice"
+                    read -p "按Enter键继续... / Press Enter to continue..." -r
                     ;;
             esac
         fi

@@ -171,13 +171,32 @@ fastify.get('/', async (request, reply) => {
 
 // 健康检查
 fastify.get('/health', async (request, reply) => {
+  const uptime = process.uptime()
+  const memory = process.memoryUsage()
+  
+  // 计算运行时间
+  const days = Math.floor(uptime / (24 * 60 * 60))
+  const hours = Math.floor((uptime % (24 * 60 * 60)) / (60 * 60))
+  const minutes = Math.floor((uptime % (60 * 60)) / 60)
+  const seconds = Math.floor(uptime % 60)
+  
+  // 转换内存单位为MB
+  const formatMemory = (bytes) => (bytes / 1024 / 1024).toFixed(2)
+  
   return {
-    ...getHealthCheck('Google Translate Service'),
-    version: '1.0.2',
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
+    status: "ok",
     timestamp: new Date().toISOString(),
-    environment: config.nodeEnv
+    service: "Google Translate Service",
+    version: "1.0.2",
+    environment: config.nodeEnv,
+    uptime: `服务已运行 ${days}天 ${hours}时 ${minutes}分 ${seconds}秒`,
+    memory: {
+      rss: `进程占用的物理内存是 ${formatMemory(memory.rss)}MB`,
+      heapTotal: `堆总内存是 ${formatMemory(memory.heapTotal)}MB`,
+      heapUsed: `堆已使用内存是 ${formatMemory(memory.heapUsed)}MB`,
+      external: `外部内存是 ${formatMemory(memory.external)}MB`,
+      arrayBuffers: `数组缓冲区是 ${formatMemory(memory.arrayBuffers)}MB`
+    }
   }
 })
 
