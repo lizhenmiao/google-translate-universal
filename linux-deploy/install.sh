@@ -67,19 +67,23 @@ detect_os() {
     if [ -f /etc/alpine-release ]; then
         OS="alpine"
         PKG_MANAGER="apk"
+        INIT_SYSTEM="openrc"
         log_info "检测到 Alpine Linux"
     elif [ -f /etc/ubuntu-release ] || [ -f /etc/debian_version ]; then
         OS="ubuntu"
         PKG_MANAGER="apt"
+        INIT_SYSTEM="systemd"
         log_info "检测到 Ubuntu/Debian"
     elif [ -f /etc/centos-release ] || [ -f /etc/redhat-release ]; then
         OS="centos"
         PKG_MANAGER="yum"
+        INIT_SYSTEM="systemd"
         log_info "检测到 CentOS/RHEL"
     else
         log_warn "未知的操作系统，将使用通用安装方式"
         OS="generic"
         PKG_MANAGER="unknown"
+        INIT_SYSTEM="unknown"
     fi
 }
 
@@ -87,10 +91,24 @@ detect_os() {
 install_dependencies() {
     log_info "安装系统依赖..."
     
+    # 检查Node.js是否已安装
+    if command -v node &> /dev/null; then
+        NODE_VERSION=$(node --version)
+        log_info "检测到已安装的 Node.js 版本: $NODE_VERSION"
+        
+        # 检查版本是否符合要求
+        if [[ ${NODE_VERSION:1:2} -ge 16 ]]; then
+            log_success "Node.js 版本符合要求，跳过安装"
+            return
+        else
+            log_warn "Node.js 版本过低，需要升级到16.0.0或更高版本"
+        fi
+    fi
+    
     case $PKG_MANAGER in
         "apk")
             apk update
-            apk add --no-cache nodejs npm curl bash logrotate
+            apk add --no-cache nodejs npm curl bash logrotate openrc
             ;;
         "apt")
             apt update
@@ -124,7 +142,22 @@ install_dependencies() {
 
 # 下载应用文件
 download_app_files() {
-    log_info "下载应用文件..."
+    if [ -d "$APP_DIR" ]; then
+        log_info "检测到应用目录已存在，是否覆盖？"
+        read -p "覆盖现有应用文件? [y/N]: " overwrite
+        case $overwrite in
+            [Yy]* )
+                log_info "覆盖现有应用文件..."
+                rm -rf $APP_DIR
+                ;;
+            * )
+                log_info "跳过应用文件下载"
+                return
+                ;;
+        esac
+    else
+        log_info "下载应用文件..."
+    fi
     
     # 创建应用目录
     mkdir -p $APP_DIR
@@ -231,9 +264,95 @@ EOF
     log_success "环境配置文件创建完成"
 }
 
+# 创建服务配置
+create_service() {
+    if [ "$INIT_SYSTEM" = "openrc" ]; then
+        create_openrc_service
+    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+        create_systemd_service
+    else
+        log_error "不支持的初始化系统"
+        exit 1
+    fi
+}
+
+# 创建OpenRC服务 (Alpine Linux)
+create_openrc_service() {
+    local openrc_file="/etc/init.d/$APP_NAME"
+    
+    if [ -f "$openrc_file" ]; then
+        log_info "检测到已存在的OpenRC服务，是否覆盖？"
+        read -p "覆盖现有服务? [y/N]: " overwrite
+        case $overwrite in
+            [Yy]* )
+                log_info "覆盖现有OpenRC服务..."
+                ;;
+            * )
+                log_info "跳过OpenRC服务创建"
+                return
+                ;;
+        esac
+    else
+        log_info "创建OpenRC服务..."
+    fi
+    
+    cat > "$openrc_file" << EOF
+#!/sbin/openrc-run
+
+name="Google Translate Service"
+description="Google Translate Universal Service"
+command="/usr/bin/node"
+command_args="translate-service.js"
+command_background=true
+pidfile="/run/\${RC_SVCNAME}.pid"
+directory="$APP_DIR"
+command_user="root"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    checkpath --directory --owner root:root --mode 0755 /run
+    
+    # 加载环境变量
+    if [ -f "$APP_DIR/.env" ]; then
+        export \$(grep -v '^#' "$APP_DIR/.env" | xargs)
+    fi
+}
+EOF
+    
+    chmod +x "$openrc_file"
+    
+    # 检查是否已在开机自启列表中
+    if rc-update show default | grep -q "$APP_NAME"; then
+        log_info "服务已在开机自启列表中"
+    elif [ "$ENABLE_AUTOSTART" = true ]; then
+        rc-update add "$APP_NAME" default
+        log_success "服务已设置为开机自启"
+    fi
+    
+    log_success "OpenRC服务创建完成"
+}
+
 # 创建systemd服务
 create_systemd_service() {
-    log_info "创建systemd服务..."
+    if [ -f "$SERVICE_FILE" ]; then
+        log_info "检测到已存在的systemd服务，是否覆盖？"
+        read -p "覆盖现有服务? [y/N]: " overwrite
+        case $overwrite in
+            [Yy]* )
+                log_info "覆盖现有systemd服务..."
+                ;;
+            * )
+                log_info "跳过systemd服务创建"
+                return
+                ;;
+        esac
+    else
+        log_info "创建systemd服务..."
+    fi
     
     cat > $SERVICE_FILE << EOF
 [Unit]
@@ -264,7 +383,10 @@ EOF
     
     systemctl daemon-reload
     
-    if [ "$ENABLE_AUTOSTART" = true ]; then
+    # 检查是否已启用开机自启
+    if systemctl is-enabled --quiet $APP_NAME; then
+        log_info "服务已启用开机自启"
+    elif [ "$ENABLE_AUTOSTART" = true ]; then
         systemctl enable $APP_NAME
         log_success "服务已设置为开机自启"
     fi
@@ -274,7 +396,21 @@ EOF
 
 # 配置日志轮转
 setup_logrotate() {
-    log_info "配置日志轮转..."
+    if [ -f "$LOGROTATE_FILE" ]; then
+        log_info "检测到已存在的logrotate配置，是否覆盖？"
+        read -p "覆盖现有logrotate配置? [y/N]: " overwrite
+        case $overwrite in
+            [Yy]* )
+                log_info "覆盖现有logrotate配置..."
+                ;;
+            * )
+                log_info "跳过logrotate配置"
+                return
+                ;;
+        esac
+    else
+        log_info "配置日志轮转..."
+    fi
     
     cat > $LOGROTATE_FILE << EOF
 $APP_DIR/logs/translate-service.log {
@@ -320,31 +456,53 @@ setup_firewall() {
 start_service() {
     log_info "启动服务..."
     
-    if systemctl start $APP_NAME; then
-        sleep 2
-        if systemctl is-active --quiet $APP_NAME; then
-            log_success "服务启动成功!"
-            echo
-            log_info "服务信息:"
-            echo "  访问地址: http://localhost:$PORT"
-            echo "  健康检查: http://localhost:$PORT/health"
-            echo "  API文档: http://localhost:$PORT"
-            if [ -n "$ACCESS_TOKEN" ]; then
-                echo "  访问TOKEN: $ACCESS_TOKEN"
+    if [ "$INIT_SYSTEM" = "openrc" ]; then
+        if rc-service $APP_NAME start; then
+            sleep 2
+            if rc-service $APP_NAME status | grep -q "started"; then
+                log_success "服务启动成功!"
+                show_service_info
+            else
+                log_error "服务启动失败"
+                show_service_status
             fi
         else
             log_error "服务启动失败"
-            show_service_status
         fi
-    else
-        log_error "服务启动失败"
+    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+        if systemctl start $APP_NAME; then
+            sleep 2
+            if systemctl is-active --quiet $APP_NAME; then
+                log_success "服务启动成功!"
+                show_service_info
+            else
+                log_error "服务启动失败"
+                show_service_status
+            fi
+        else
+            log_error "服务启动失败"
+        fi
+    fi
+}
+
+# 显示服务信息
+show_service_info() {
+    echo
+    log_info "服务信息:"
+    echo "  访问地址: http://localhost:$PORT"
+    echo "  健康检查: http://localhost:$PORT/health"
+    echo "  API文档: http://localhost:$PORT"
+    if [ -n "$ACCESS_TOKEN" ]; then
+        echo "  访问TOKEN: $ACCESS_TOKEN"
     fi
 }
 
 # 检查服务状态
 check_service_status() {
-    if systemctl is-active --quiet $APP_NAME; then
-        return 0
+    if [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-service $APP_NAME status | grep -q "started"
+    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl is-active --quiet $APP_NAME
     else
         return 1
     fi
@@ -354,7 +512,13 @@ check_service_status() {
 show_service_status() {
     echo
     log_info "服务状态信息:"
-    systemctl status $APP_NAME --no-pager -l
+    
+    if [ "$INIT_SYSTEM" = "openrc" ]; then
+        rc-service $APP_NAME status
+    elif [ "$INIT_SYSTEM" = "systemd" ]; then
+        systemctl status $APP_NAME --no-pager -l
+    fi
+    
     echo
     
     log_info "端口监听状态:"
@@ -394,15 +558,29 @@ show_logs() {
             ;;
         3)
             log_info "显示系统服务日志 (按q退出):"
-            journalctl -u $APP_NAME --no-pager
+            if [ "$INIT_SYSTEM" = "systemd" ]; then
+                journalctl -u $APP_NAME --no-pager
+            elif [ "$INIT_SYSTEM" = "openrc" ]; then
+                if [ -f "/var/log/messages" ]; then
+                    grep "$APP_NAME" /var/log/messages | tail -50
+                elif [ -f "/var/log/syslog" ]; then
+                    grep "$APP_NAME" /var/log/syslog | tail -50
+                else
+                    log_warn "未找到系统日志文件"
+                fi
+            else
+                log_warn "不支持的初始化系统"
+            fi
             return
             ;;
         4)
             log_info "显示实时日志 (按Ctrl+C退出):"
             if [ -f "$APP_DIR/logs/translate-service.log" ]; then
                 tail -f "$APP_DIR/logs/translate-service.log"
-            else
+            elif [ "$INIT_SYSTEM" = "systemd" ]; then
                 journalctl -u $APP_NAME -f
+            else
+                log_warn "未找到日志文件"
             fi
             return
             ;;
@@ -434,6 +612,11 @@ show_logs() {
 
 # 服务管理菜单
 service_management() {
+    # 确保操作系统已检测
+    if [ -z "$INIT_SYSTEM" ]; then
+        detect_os
+    fi
+    
     while true; do
         clear
         show_banner
@@ -464,28 +647,52 @@ service_management() {
         case $choice in
             1)
                 log_info "启动服务..."
-                if systemctl start $APP_NAME; then
-                    log_success "服务启动成功"
-                else
-                    log_error "服务启动失败"
+                if [ "$INIT_SYSTEM" = "openrc" ]; then
+                    if rc-service $APP_NAME start; then
+                        log_success "服务启动成功"
+                    else
+                        log_error "服务启动失败"
+                    fi
+                elif [ "$INIT_SYSTEM" = "systemd" ]; then
+                    if systemctl start $APP_NAME; then
+                        log_success "服务启动成功"
+                    else
+                        log_error "服务启动失败"
+                    fi
                 fi
                 read -p "按Enter键继续..." -r
                 ;;
             2)
                 log_info "停止服务..."
-                if systemctl stop $APP_NAME; then
-                    log_success "服务停止成功"
-                else
-                    log_error "服务停止失败"
+                if [ "$INIT_SYSTEM" = "openrc" ]; then
+                    if rc-service $APP_NAME stop; then
+                        log_success "服务停止成功"
+                    else
+                        log_error "服务停止失败"
+                    fi
+                elif [ "$INIT_SYSTEM" = "systemd" ]; then
+                    if systemctl stop $APP_NAME; then
+                        log_success "服务停止成功"
+                    else
+                        log_error "服务停止失败"
+                    fi
                 fi
                 read -p "按Enter键继续..." -r
                 ;;
             3)
                 log_info "重启服务..."
-                if systemctl restart $APP_NAME; then
-                    log_success "服务重启成功"
-                else
-                    log_error "服务重启失败"
+                if [ "$INIT_SYSTEM" = "openrc" ]; then
+                    if rc-service $APP_NAME restart; then
+                        log_success "服务重启成功"
+                    else
+                        log_error "服务重启失败"
+                    fi
+                elif [ "$INIT_SYSTEM" = "systemd" ]; then
+                    if systemctl restart $APP_NAME; then
+                        log_success "服务重启成功"
+                    else
+                        log_error "服务重启失败"
+                    fi
                 fi
                 read -p "按Enter键继续..." -r
                 ;;
@@ -498,19 +705,35 @@ service_management() {
                 ;;
             6)
                 log_info "启用开机自启..."
-                if systemctl enable $APP_NAME; then
-                    log_success "开机自启已启用"
-                else
-                    log_error "开机自启启用失败"
+                if [ "$INIT_SYSTEM" = "openrc" ]; then
+                    if rc-update add $APP_NAME default; then
+                        log_success "开机自启已启用"
+                    else
+                        log_error "开机自启启用失败"
+                    fi
+                elif [ "$INIT_SYSTEM" = "systemd" ]; then
+                    if systemctl enable $APP_NAME; then
+                        log_success "开机自启已启用"
+                    else
+                        log_error "开机自启启用失败"
+                    fi
                 fi
                 read -p "按Enter键继续..." -r
                 ;;
             7)
                 log_info "禁用开机自启..."
-                if systemctl disable $APP_NAME; then
-                    log_success "开机自启已禁用"
-                else
-                    log_error "开机自启禁用失败"
+                if [ "$INIT_SYSTEM" = "openrc" ]; then
+                    if rc-update del $APP_NAME default; then
+                        log_success "开机自启已禁用"
+                    else
+                        log_error "开机自启禁用失败"
+                    fi
+                elif [ "$INIT_SYSTEM" = "systemd" ]; then
+                    if systemctl disable $APP_NAME; then
+                        log_success "开机自启已禁用"
+                    else
+                        log_error "开机自启禁用失败"
+                    fi
                 fi
                 read -p "按Enter键继续..." -r
                 ;;
@@ -541,16 +764,20 @@ uninstall_service() {
         log_info "正在卸载服务..."
         
         # 停止并禁用服务
-        systemctl stop $APP_NAME &>/dev/null || true
-        systemctl disable $APP_NAME &>/dev/null || true
+        if [ "$INIT_SYSTEM" = "openrc" ]; then
+            rc-service $APP_NAME stop &>/dev/null || true
+            rc-update del $APP_NAME default &>/dev/null || true
+            rm -f "/etc/init.d/$APP_NAME"
+        elif [ "$INIT_SYSTEM" = "systemd" ]; then
+            systemctl stop $APP_NAME &>/dev/null || true
+            systemctl disable $APP_NAME &>/dev/null || true
+            rm -f $SERVICE_FILE
+            systemctl daemon-reload
+        fi
         
         # 删除文件
-        rm -f $SERVICE_FILE
         rm -f $LOGROTATE_FILE
         rm -rf $APP_DIR
-        
-        # 重新加载systemd
-        systemctl daemon-reload
         
         log_success "服务卸载完成"
     else
@@ -571,7 +798,7 @@ install_service() {
     install_node_dependencies
     get_user_config
     create_env_file
-    create_systemd_service
+    create_service
     setup_logrotate
     setup_firewall
     start_service
@@ -626,7 +853,7 @@ main_menu() {
         echo "主菜单:"
         echo
         
-        if [ -f "$SERVICE_FILE" ]; then
+        if [ -f "$SERVICE_FILE" ] || [ -f "/etc/init.d/$APP_NAME" ]; then
             echo "1) 服务管理"
             echo "2) 健康检查"
             echo "3) 重新安装"
