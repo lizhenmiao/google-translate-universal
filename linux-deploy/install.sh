@@ -11,7 +11,7 @@ APP_NAME="google-translate-service"
 APP_DIR="/opt/google-translate-service"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 LOGROTATE_FILE="/etc/logrotate.d/${APP_NAME}"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.2"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/lizhenmiao/google-translate-universal/master/linux-deploy"
 
 # 语言配置
@@ -138,16 +138,37 @@ detect_os() {
         PKG_MANAGER="apk"
         INIT_SYSTEM="openrc"
         log_info "检测到 Alpine Linux"
-    elif [ -f /etc/ubuntu-release ] || [ -f /etc/debian_version ]; then
+    elif [ -f /etc/lsb-release ] || [ -f /etc/debian_version ]; then
         OS="ubuntu"
         PKG_MANAGER="apt"
         INIT_SYSTEM="systemd"
         log_info "检测到 Ubuntu/Debian"
-    elif [ -f /etc/centos-release ] || [ -f /etc/redhat-release ]; then
+    elif [ -f /etc/centos-release ] || [ -f /etc/redhat-release ] || [ -f /etc/rocky-release ] || [ -f /etc/almalinux-release ]; then
         OS="centos"
-        PKG_MANAGER="yum"
+        # 检测是否有 dnf，如果有则优先使用 dnf
+        if command -v dnf &> /dev/null; then
+            PKG_MANAGER="dnf"
+            log_info "检测到 Fedora/CentOS 8+，使用 dnf"
+        else
+            PKG_MANAGER="yum"
+            log_info "检测到 CentOS/RHEL，使用 yum"
+        fi
         INIT_SYSTEM="systemd"
-        log_info "检测到 CentOS/RHEL"
+    elif [ -f /etc/fedora-release ]; then
+        OS="fedora"
+        PKG_MANAGER="dnf"
+        INIT_SYSTEM="systemd"
+        log_info "检测到 Fedora"
+    elif [ -f /etc/arch-release ]; then
+        OS="arch"
+        PKG_MANAGER="pacman"
+        INIT_SYSTEM="systemd"
+        log_info "检测到 Arch Linux"
+    elif [ -f /etc/SUSE-brand ] || [ -f /etc/SuSE-release ]; then
+        OS="suse"
+        PKG_MANAGER="zypper"
+        INIT_SYSTEM="systemd"
+        log_info "检测到 openSUSE/SLES"
     else
         log_warn "未知的操作系统，将使用通用安装方式"
         OS="generic"
@@ -187,8 +208,25 @@ install_dependencies() {
             yum update -y
             yum install -y nodejs npm curl bash logrotate
             ;;
+        "dnf")
+            dnf update -y
+            dnf install -y nodejs npm curl bash logrotate
+            ;;
+        "pacman")
+            pacman -Sy --noconfirm nodejs npm curl bash logrotate
+            ;;
+        "zypper")
+            zypper refresh
+            zypper install -y nodejs npm curl bash logrotate
+            ;;
         *)
-            log_warn "请手动安装 Node.js, npm, curl, bash, logrotate"
+            log_warn "不支持的包管理器: $PKG_MANAGER"
+            log_warn "请手动安装以下依赖："
+            echo "- Node.js (>=16.0.0)"
+            echo "- npm"
+            echo "- curl"
+            echo "- bash"
+            echo "- logrotate"
             read -p "安装完成后按Enter继续..." -r
             ;;
     esac
@@ -262,9 +300,9 @@ EOF
     log_success "应用文件下载完成"
 }
 
-# 安装Node.js依赖
+# 安装项目依赖
 install_node_dependencies() {
-    log_info "安装Node.js依赖..."
+    log_info "安装项目依赖..."
     cd $APP_DIR
     
     if npm install --production; then
@@ -490,8 +528,10 @@ $APP_DIR/logs/translate-service.log {
     missingok
     notifempty
     copytruncate
+    dateext
+    dateformat -%Y%m%d
     postrotate
-        echo "日志已轮转: \$(date)" >> /var/log/translate-service-rotate.log
+        echo "日志已轮转: \$(date)" >> $APP_DIR/logs/rotate.log
     endscript
 }
 EOF
@@ -586,6 +626,19 @@ show_service_status() {
     fi
     current_port=${current_port:-3000}
     
+    # 获取访问TOKEN
+    local access_token=""
+    if [ -f "$APP_DIR/.env" ]; then
+        access_token=$(grep "^ACCESS_TOKEN=" "$APP_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    fi
+    
+    # 获取运行环境
+    local node_env=""
+    if [ -f "$APP_DIR/.env" ]; then
+        node_env=$(grep "^NODE_ENV=" "$APP_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    fi
+    node_env=${node_env:-production}
+    
     echo
     log_info "$(get_text 'service_status')"
     
@@ -605,6 +658,18 @@ show_service_status() {
     fi
     
     echo
+    log_info "服务配置信息:"
+    echo " * 监听端口: $current_port"
+    echo " * 运行环境: $node_env"
+    if [ -n "$access_token" ]; then
+        echo " * 访问TOKEN: ${access_token}"
+    else
+        echo " * 访问TOKEN: 未配置"
+    fi
+    echo " * 安装目录: $APP_DIR"
+    echo " * 日志目录: $APP_DIR/logs"
+    
+    echo
     
     log_info "$(get_text 'port_listening')"
     local port_status=""
@@ -620,6 +685,22 @@ show_service_status() {
     else
         echo "端口 $current_port 未监听"
     fi
+    
+    # 尝试获取服务健康状态
+    echo
+    log_info "服务健康检查:"
+    if command -v curl &> /dev/null; then
+        local health_check=$(curl -s --max-time 3 "http://localhost:$current_port/health" 2>/dev/null)
+        if [ $? -eq 0 ] && echo "$health_check" | grep -q '"status":"ok"'; then
+            echo " * 健康状态: 正常"
+            echo " * 服务版本: $(echo "$health_check" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)"
+            echo " * 运行时间: $(echo "$health_check" | grep -o '"uptime":"[^"]*"' | cut -d'"' -f4)"
+        else
+            echo " * 健康状态: 异常或无响应"
+        fi
+    else
+        echo " * 健康状态: 无法检查（curl命令不可用）"
+    fi
 }
 
 # 查看日志
@@ -633,10 +714,11 @@ show_logs() {
     echo "2) 昨天的日志"
     echo "3) 系统服务日志"
     echo "4) 实时日志"
+    echo "5) 列出所有日志文件"
     echo "0) 返回主菜单"
     echo
     
-    read -p "请选择 [0-4]: " choice
+    read -p "请选择 [0-5]: " choice
     
     case $choice in
         1)
@@ -644,11 +726,28 @@ show_logs() {
             log_file="$APP_DIR/logs/translate-service.log"
             ;;
         2)
-            log_date=$(date -d "yesterday" +%Y-%m-%d)
-            log_file="$APP_DIR/logs/translate-service.log.1"
+            # 使用兼容的方式获取昨天日期
+            if date -d "yesterday" +%Y%m%d >/dev/null 2>&1; then
+                # GNU date 支持 -d 参数 (Ubuntu/Debian/CentOS)
+                log_date=$(date -d "yesterday" +%Y%m%d)
+            else
+                # BusyBox date 不支持 -d 参数 (Alpine Linux)
+                log_date=$(date -D "%s" -d "$(( $(date +%s) - 86400 ))" +%Y%m%d 2>/dev/null || \
+                          date -r "$(( $(date +%s) - 86400 ))" +%Y%m%d 2>/dev/null || \
+                          date -d "1 day ago" +%Y%m%d 2>/dev/null || \
+                          date +%Y%m%d)
+            fi
+            # 先尝试未压缩的文件，再尝试压缩的文件
+            if [ -f "$APP_DIR/logs/translate-service.log-$log_date" ]; then
+                log_file="$APP_DIR/logs/translate-service.log-$log_date"
+            elif [ -f "$APP_DIR/logs/translate-service.log-$log_date.gz" ]; then
+                log_file="$APP_DIR/logs/translate-service.log-$log_date.gz"
+            else
+                log_file="$APP_DIR/logs/translate-service.log-$log_date"
+            fi
             ;;
         3)
-            log_info "显示系统服务日志 (按q退出):"
+            log_info "显示系统服务日志:"
             if [ "$INIT_SYSTEM" = "systemd" ]; then
                 journalctl -u $APP_NAME --no-pager
             elif [ "$INIT_SYSTEM" = "openrc" ]; then
@@ -662,6 +761,8 @@ show_logs() {
             else
                 log_warn "不支持的初始化系统"
             fi
+            echo
+            read -p "按Enter键返回..." -r
             return
             ;;
         4)
@@ -673,6 +774,30 @@ show_logs() {
             else
                 log_warn "未找到日志文件"
             fi
+            return
+            ;;
+        5)
+            log_info "所有日志文件列表:"
+            echo "----------------------------------------"
+            if [ -d "$APP_DIR/logs" ]; then
+                ls -la "$APP_DIR/logs/"translate-service.log* 2>/dev/null | while read -r line; do
+                    # 提取文件名和大小信息
+                    file_info=$(echo "$line" | awk '{print $9, "(" $5 " bytes)", $6, $7, $8}')
+                    echo "$file_info"
+                done
+                echo "----------------------------------------"
+                echo
+                echo "轮转操作日志:"
+                if [ -f "$APP_DIR/logs/rotate.log" ]; then
+                    tail -10 "$APP_DIR/logs/rotate.log"
+                else
+                    echo "暂无轮转日志"
+                fi
+            else
+                log_warn "日志目录不存在: $APP_DIR/logs"
+            fi
+            echo
+            read -p "按Enter键返回..." -r
             return
             ;;
         0)
@@ -866,9 +991,30 @@ uninstall_service() {
             systemctl daemon-reload
         fi
         
-        # 删除文件
+        # 获取端口号（在删除文件之前）
+        local current_port=3000
+        if [ -f "$APP_DIR/.env" ]; then
+            current_port=$(grep "^PORT=" "$APP_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+            current_port=${current_port:-3000}
+        fi
+        
+        # 删除文件和配置
         rm -f $LOGROTATE_FILE
         rm -rf $APP_DIR
+        
+        # 删除防火墙规则
+        log_info "清理防火墙规则..."
+        if command -v ufw &>/dev/null; then
+            ufw --force delete allow $current_port &>/dev/null || true
+            log_info "已删除 ufw 防火墙规则"
+        elif command -v firewall-cmd &>/dev/null; then
+            firewall-cmd --permanent --remove-port=$current_port/tcp &>/dev/null || true
+            firewall-cmd --reload &>/dev/null || true
+            log_info "已删除 firewall-cmd 防火墙规则"
+        fi
+        
+        # 清理可能的其他残留文件
+        rm -f /var/log/translate-service-rotate.log &>/dev/null || true
         
         log_success "服务卸载完成"
     else
