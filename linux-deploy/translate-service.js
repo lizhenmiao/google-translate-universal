@@ -11,7 +11,7 @@ import {
 // ========== 应用配置 ==========
 const config = {
   port: process.env.PORT || 3000,
-  host: process.env.HOST || '0.0.0.0',
+  host: process.env.HOST || '::',  // 默认使用IPv6双栈模式
   accessToken: process.env.ACCESS_TOKEN || '',
   nodeEnv: process.env.NODE_ENV || 'production'
 }
@@ -169,14 +169,37 @@ const start = async () => {
       host: config.host 
     })
     
+    // 构造正确的访问地址
+    const getDisplayUrl = (host, port) => {
+      if (host === '::' || host === '::1') {
+        // IPv6 地址需要用方括号包围
+        return `http://[${host === '::' ? '::1' : host}]:${port}`
+      } else if (host === '0.0.0.0') {
+        // 0.0.0.0 显示为 127.0.0.1
+        return `http://127.0.0.1:${port}`
+      } else {
+        // 其他地址直接显示
+        return `http://${host}:${port}`
+      }
+    }
+    
+    const displayUrl = getDisplayUrl(config.host, config.port)
+    
     const startupInfo = [
       `🚀 Google翻译服务已启动`,
-      `📡 服务地址: http://${config.host}:${config.port}`,
-      `🏥 健康检查: http://${config.host}:${config.port}/health`,
-      `📖 API文档: http://${config.host}:${config.port}/`,
+      `📡 监听地址: ${config.host}:${config.port}`,
+      `🌐 访问地址: ${displayUrl}`,
+      `🏥 健康检查: ${displayUrl}/health`,
+      `📖 API文档: ${displayUrl}/`,
       `🔧 环境: ${config.nodeEnv}`,
       `📊 进程ID: ${process.pid}`
     ]
+    
+    // 如果是双栈模式，显示额外的访问方式
+    if (config.host === '::') {
+      startupInfo.push(`🔄 IPv4访问: http://127.0.0.1:${config.port}`)
+      startupInfo.push(`🔄 IPv6访问: http://[::1]:${config.port}`)
+    }
     
     startupInfo.forEach(info => {
       fastify.log.info(info)

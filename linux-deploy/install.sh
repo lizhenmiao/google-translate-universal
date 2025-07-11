@@ -313,11 +313,26 @@ install_node_dependencies() {
     fi
 }
 
+# 智能设置监听地址
+set_listening_address() {
+    # 检查IPv6支持
+    if ip -6 addr show 2>/dev/null | grep -q "inet6 " || ifconfig 2>/dev/null | grep -q "inet6 "; then
+        HOST="::"  # IPv6 双栈，自动兼容IPv4
+        log_info "系统支持IPv6，使用双栈模式 (::) - 同时支持IPv4和IPv6访问"
+    else
+        HOST="0.0.0.0"  # 仅IPv4
+        log_info "系统仅支持IPv4，使用IPv4模式 (0.0.0.0)"
+    fi
+}
+
 # 获取用户配置
 get_user_config() {
     echo
     log_info "请配置服务参数:"
     echo
+    
+    # 自动设置监听地址
+    set_listening_address
     
     # 端口配置
     while true; do
@@ -350,6 +365,7 @@ get_user_config() {
     
     echo
     log_info "配置信息:"
+    echo "  监听地址: $HOST $([ "$HOST" = "::" ] && echo "(IPv4+IPv6双栈)" || echo "(仅IPv4)")"
     echo "  端口: $PORT"
     echo "  TOKEN: ${ACCESS_TOKEN:-未设置}"
     echo "  开机自启: $ENABLE_AUTOSTART"
@@ -363,7 +379,7 @@ create_env_file() {
     cat > $APP_DIR/.env << EOF
 NODE_ENV=production
 PORT=$PORT
-HOST=0.0.0.0
+HOST=$HOST
 ACCESS_TOKEN=$ACCESS_TOKEN
 EOF
     
@@ -596,11 +612,37 @@ start_service() {
 
 # 显示服务信息
 show_service_info() {
+    # 获取监听地址
+    local current_host=""
+    if [ -f "$APP_DIR/.env" ]; then
+        current_host=$(grep "^HOST=" "$APP_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    fi
+    current_host=${current_host:-"0.0.0.0"}
+    
     echo
     log_info "服务信息:"
-    echo "  访问地址: http://localhost:$PORT"
-    echo "  健康检查: http://localhost:$PORT/health"
-    echo "  API文档: http://localhost:$PORT"
+    
+    # 根据监听地址显示不同的访问方式
+    if [ "$current_host" = "::" ]; then
+        echo "  IPv6访问地址: http://[::1]:$PORT"
+        echo "  IPv4访问地址: http://127.0.0.1:$PORT"
+        echo "  IPv6健康检查: http://[::1]:$PORT/health"
+        echo "  IPv4健康检查: http://127.0.0.1:$PORT/health"
+        echo "  API文档: http://[::1]:$PORT 或 http://127.0.0.1:$PORT"
+    elif [ "$current_host" = "::1" ]; then
+        echo "  IPv6访问地址: http://[::1]:$PORT"
+        echo "  IPv6健康检查: http://[::1]:$PORT/health"
+        echo "  IPv6 API文档: http://[::1]:$PORT"
+    elif [ "$current_host" = "0.0.0.0" ]; then
+        echo "  IPv4访问地址: http://127.0.0.1:$PORT"
+        echo "  IPv4健康检查: http://127.0.0.1:$PORT/health"
+        echo "  IPv4 API文档: http://127.0.0.1:$PORT"
+    else
+        echo "  访问地址: http://$current_host:$PORT"
+        echo "  健康检查: http://$current_host:$PORT/health"
+        echo "  API文档: http://$current_host:$PORT"
+    fi
+    
     if [ -n "$ACCESS_TOKEN" ]; then
         echo "  访问TOKEN: $ACCESS_TOKEN"
     fi
@@ -625,6 +667,13 @@ show_service_status() {
         current_port=$(grep "^PORT=" "$APP_DIR/.env" 2>/dev/null | cut -d'=' -f2)
     fi
     current_port=${current_port:-3000}
+    
+    # 获取监听地址
+    local current_host=""
+    if [ -f "$APP_DIR/.env" ]; then
+        current_host=$(grep "^HOST=" "$APP_DIR/.env" 2>/dev/null | cut -d'=' -f2)
+    fi
+    current_host=${current_host:-"0.0.0.0"}
     
     # 获取访问TOKEN
     local access_token=""
@@ -659,6 +708,7 @@ show_service_status() {
     
     echo
     log_info "服务配置信息:"
+    echo " * 监听地址: $current_host"
     echo " * 监听端口: $current_port"
     echo " * 运行环境: $node_env"
     if [ -n "$access_token" ]; then
@@ -690,13 +740,39 @@ show_service_status() {
     echo
     log_info "服务健康检查:"
     if command -v curl &> /dev/null; then
-        local health_check=$(curl -s --max-time 3 "http://localhost:$current_port/health" 2>/dev/null)
+        local health_url=""
+        local health_check=""
+        
+        # 根据监听地址构造健康检查URL
+        if [ "$current_host" = "::" ]; then
+            # 先尝试IPv6，再尝试IPv4
+            health_url="http://[::1]:$current_port/health"
+            health_check=$(curl -s --max-time 3 "$health_url" 2>/dev/null)
+            if [ $? -ne 0 ]; then
+                health_url="http://127.0.0.1:$current_port/health"
+                health_check=$(curl -s --max-time 3 "$health_url" 2>/dev/null)
+            fi
+        elif [ "$current_host" = "::1" ]; then
+            health_url="http://[::1]:$current_port/health"
+            health_check=$(curl -s --max-time 3 "$health_url" 2>/dev/null)
+        else
+            # IPv4 或具体地址
+            local test_host="$current_host"
+            if [ "$current_host" = "0.0.0.0" ]; then
+                test_host="127.0.0.1"
+            fi
+            health_url="http://$test_host:$current_port/health"
+            health_check=$(curl -s --max-time 3 "$health_url" 2>/dev/null)
+        fi
+        
         if [ $? -eq 0 ] && echo "$health_check" | grep -q '"status":"ok"'; then
             echo " * 健康状态: 正常"
+            echo " * 测试地址: $health_url"
             echo " * 服务版本: $(echo "$health_check" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)"
             echo " * 运行时间: $(echo "$health_check" | grep -o '"uptime":"[^"]*"' | cut -d'"' -f4)"
         else
             echo " * 健康状态: 异常或无响应"
+            echo " * 测试地址: $health_url"
         fi
     else
         echo " * 健康状态: 无法检查（curl命令不可用）"
@@ -1024,6 +1100,98 @@ uninstall_service() {
     read -p "按Enter键继续..." -r
 }
 
+# 重新安装服务
+reinstall_service() {
+    log_info "开始重新安装Google翻译服务..."
+    echo
+    
+    # 检测操作系统
+    detect_os
+    
+    # 检查服务是否存在和运行
+    local service_exists=false
+    local service_running=false
+    
+    if [ "$INIT_SYSTEM" = "systemd" ] && [ -f "$SERVICE_FILE" ]; then
+        service_exists=true
+        if systemctl is-active --quiet $APP_NAME; then
+            service_running=true
+        fi
+    elif [ "$INIT_SYSTEM" = "openrc" ] && [ -f "/etc/init.d/$APP_NAME" ]; then
+        service_exists=true
+        if rc-service $APP_NAME status 2>/dev/null | grep -q "started"; then
+            service_running=true
+        fi
+    fi
+    
+    if [ "$service_exists" = true ]; then
+        log_info "检测到现有服务安装"
+        
+        if [ "$service_running" = true ]; then
+            log_warn "服务正在运行，需要先停止服务"
+            read -p "是否停止当前服务? [Y/n]: " stop_service
+            stop_service=${stop_service:-Y}
+            
+            case $stop_service in
+                [Yy]*)
+                    log_info "正在停止服务..."
+                    if [ "$INIT_SYSTEM" = "systemd" ]; then
+                        systemctl stop $APP_NAME || log_warn "停止服务失败，继续安装..."
+                    elif [ "$INIT_SYSTEM" = "openrc" ]; then
+                        rc-service $APP_NAME stop || log_warn "停止服务失败，继续安装..."
+                    fi
+                    log_success "服务已停止"
+                    ;;
+                [Nn]*)
+                    log_warn "继续安装可能会导致服务冲突"
+                    ;;
+            esac
+        fi
+        
+        # 检查是否需要轮转日志
+        if [ -d "$APP_DIR/logs" ] && [ -f "$APP_DIR/logs/translate-service.log" ]; then
+            local log_size=$(du -k "$APP_DIR/logs/translate-service.log" 2>/dev/null | cut -f1)
+            if [ "$log_size" -gt 1024 ]; then  # 大于1MB
+                log_info "发现较大的日志文件 (${log_size}KB)"
+                read -p "是否轮转当前日志文件? [Y/n]: " rotate_logs
+                rotate_logs=${rotate_logs:-Y}
+                
+                case $rotate_logs in
+                    [Yy]*)
+                        log_info "轮转日志文件..."
+                        local timestamp=$(date +%Y%m%d_%H%M%S)
+                        mv "$APP_DIR/logs/translate-service.log" "$APP_DIR/logs/translate-service.log-${timestamp}" 2>/dev/null || true
+                        log_success "日志文件已轮转"
+                        ;;
+                esac
+            fi
+        fi
+        
+        # 清理临时文件
+        if [ -d "$APP_DIR" ]; then
+            log_info "清理临时文件..."
+            rm -f "$APP_DIR"/*.tmp "$APP_DIR"/*.lock 2>/dev/null || true
+        fi
+    fi
+    
+    # 继续正常安装流程
+    install_dependencies
+    download_app_files
+    install_node_dependencies
+    get_user_config
+    create_env_file
+    create_service
+    setup_logrotate
+    setup_firewall
+    start_service
+    
+    echo
+    log_success "重新安装完成!"
+    echo
+    read -p "按Enter键进入管理菜单..." -r
+    service_management
+}
+
 # 安装服务
 install_service() {
     log_info "开始安装Google翻译服务..."
@@ -1050,32 +1218,102 @@ install_service() {
 # 健康检查
 health_check() {
     local port=""
+    local host=""
     
-    # 从配置文件读取端口
+    # 从配置文件读取端口和监听地址
     if [ -f "$APP_DIR/.env" ]; then
         port=$(grep "^PORT=" "$APP_DIR/.env" | cut -d'=' -f2)
+        host=$(grep "^HOST=" "$APP_DIR/.env" | cut -d'=' -f2)
     fi
     
     if [ -z "$port" ]; then
         port=3000
     fi
     
+    if [ -z "$host" ]; then
+        host="0.0.0.0"
+    fi
+    
     log_info "执行健康检查..."
     
-    if curl -f -s "http://localhost:$port/health" > /dev/null; then
-        log_success "健康检查通过"
+    # 构造健康检查URL
+    local health_url=""
+    if [ "$host" = "::" ]; then
+        # 双栈模式，先尝试IPv6
+        health_url="http://[::1]:$port/health"
+        log_info "尝试IPv6连接: $health_url"
         
-        echo
-        log_info "服务响应:"
-        curl -s "http://localhost:$port/health" | python3 -m json.tool 2>/dev/null || curl -s "http://localhost:$port/health"
+        if curl -f -s "$health_url" > /dev/null 2>&1; then
+            log_success "IPv6健康检查通过"
+        else
+            # IPv6失败，尝试IPv4
+            health_url="http://127.0.0.1:$port/health"
+            log_info "IPv6失败，尝试IPv4连接: $health_url"
+            
+            if curl -f -s "$health_url" > /dev/null 2>&1; then
+                log_success "IPv4健康检查通过"
+            else
+                log_error "IPv4和IPv6健康检查都失败"
+                health_check_failed "$port" "$host"
+                return
+            fi
+        fi
+    elif [ "$host" = "::1" ]; then
+        # 仅IPv6
+        health_url="http://[::1]:$port/health"
+        log_info "尝试IPv6连接: $health_url"
+        
+        if curl -f -s "$health_url" > /dev/null 2>&1; then
+            log_success "IPv6健康检查通过"
+        else
+            log_error "IPv6健康检查失败"
+            health_check_failed "$port" "$host"
+            return
+        fi
     else
-        log_error "健康检查失败"
-        echo
-        log_info "可能的原因:"
-        echo "1. 服务未启动"
-        echo "2. 端口配置错误"
-        echo "3. 防火墙阻止访问"
+        # IPv4 或具体地址
+        local test_host="$host"
+        if [ "$host" = "0.0.0.0" ]; then
+            test_host="127.0.0.1"
+        fi
+        health_url="http://$test_host:$port/health"
+        log_info "尝试IPv4连接: $health_url"
+        
+        if curl -f -s "$health_url" > /dev/null 2>&1; then
+            log_success "IPv4健康检查通过"
+        else
+            log_error "IPv4健康检查失败"
+            health_check_failed "$port" "$host"
+            return
+        fi
     fi
+    
+    echo
+    log_info "服务响应:"
+    curl -s "$health_url" | python3 -m json.tool 2>/dev/null || curl -s "$health_url"
+    
+    echo
+    read -p "按Enter键继续..." -r
+}
+
+# 健康检查失败处理
+health_check_failed() {
+    local port="$1"
+    local host="$2"
+    
+    echo
+    log_info "可能的原因:"
+    echo "1. 服务未启动"
+    echo "2. 监听地址配置错误 (当前: $host)"
+    echo "3. 端口配置错误 (当前: $port)"
+    echo "4. 防火墙阻止访问"
+    echo "5. IPv6/IPv4网络配置问题"
+    
+    echo
+    log_info "建议检查:"
+    echo "- 运行服务状态检查"
+    echo "- 检查网络监听状态"
+    echo "- 验证IPv4/IPv6网络配置"
     
     echo
     read -p "按Enter键继续..." -r
@@ -1157,7 +1395,7 @@ main_menu() {
                     health_check
                     ;;
                 3)
-                    install_service
+                    reinstall_service
                     ;;
                 4)
                     switch_language
