@@ -171,14 +171,14 @@ const start = async () => {
     
     // 构造正确的访问地址
     const getDisplayUrl = (host, port) => {
-      if (host === '::' || host === '::1') {
-        // IPv6 地址需要用方括号包围
-        return `http://[${host === '::' ? '::1' : host}]:${port}`
+      if (host === '::') {
+        // IPv6 双栈模式 - 显示本地访问地址
+        return `http://127.0.0.1:${port}`
       } else if (host === '0.0.0.0') {
-        // 0.0.0.0 显示为 127.0.0.1
+        // IPv4 全局模式 - 显示本地访问地址
         return `http://127.0.0.1:${port}`
       } else {
-        // 其他地址直接显示
+        // 具体地址
         return `http://${host}:${port}`
       }
     }
@@ -188,18 +188,21 @@ const start = async () => {
     const startupInfo = [
       `🚀 Google翻译服务已启动`,
       `📡 监听地址: ${config.host}:${config.port}`,
-      `🌐 访问地址: ${displayUrl}`,
+      `🌐 本地访问: ${displayUrl}`,
       `🏥 健康检查: ${displayUrl}/health`,
       `📖 API文档: ${displayUrl}/`,
       `🔧 环境: ${config.nodeEnv}`,
       `📊 进程ID: ${process.pid}`
     ]
     
-    // 如果是双栈模式，显示额外的访问方式
+    // 根据监听模式显示外部访问提示
     if (config.host === '::') {
-      startupInfo.push(`🔄 IPv4访问: http://127.0.0.1:${config.port}`)
-      startupInfo.push(`🔄 IPv6访问: http://[::1]:${config.port}`)
+      startupInfo.push(`🌍 外部访问: http://服务器IP:${config.port} (IPv4) 或 http://[服务器IPv6]:${config.port} (IPv6)`)
+    } else if (config.host === '0.0.0.0') {
+      startupInfo.push(`🌍 外部访问: http://服务器IP:${config.port}`)
     }
+    
+    startupInfo.push(`💡 提示: 请将'服务器IP'替换为您的实际服务器IP地址`)
     
     startupInfo.forEach(info => {
       fastify.log.info(info)

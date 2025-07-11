@@ -617,26 +617,23 @@ show_service_info() {
     if [ -f "$APP_DIR/.env" ]; then
         current_host=$(grep "^HOST=" "$APP_DIR/.env" 2>/dev/null | cut -d'=' -f2)
     fi
-    current_host=${current_host:-"0.0.0.0"}
+    current_host=${current_host:-"::"}
     
     echo
     log_info "服务信息:"
     
     # 根据监听地址显示不同的访问方式
     if [ "$current_host" = "::" ]; then
-        echo "  IPv6访问地址: http://[::1]:$PORT"
-        echo "  IPv4访问地址: http://127.0.0.1:$PORT"
-        echo "  IPv6健康检查: http://[::1]:$PORT/health"
-        echo "  IPv4健康检查: http://127.0.0.1:$PORT/health"
-        echo "  API文档: http://[::1]:$PORT 或 http://127.0.0.1:$PORT"
-    elif [ "$current_host" = "::1" ]; then
-        echo "  IPv6访问地址: http://[::1]:$PORT"
-        echo "  IPv6健康检查: http://[::1]:$PORT/health"
-        echo "  IPv6 API文档: http://[::1]:$PORT"
+        echo "  IPv6+IPv4访问地址: http://[服务器IP]:$PORT"
+        echo "  本地IPv4访问: http://127.0.0.1:$PORT"
+        echo "  本地IPv6访问: http://[::1]:$PORT"
+        echo "  健康检查: http://127.0.0.1:$PORT/health"
+        echo "  API文档: http://127.0.0.1:$PORT"
     elif [ "$current_host" = "0.0.0.0" ]; then
-        echo "  IPv4访问地址: http://127.0.0.1:$PORT"
-        echo "  IPv4健康检查: http://127.0.0.1:$PORT/health"
-        echo "  IPv4 API文档: http://127.0.0.1:$PORT"
+        echo "  IPv4访问地址: http://服务器IP:$PORT"
+        echo "  本地访问: http://127.0.0.1:$PORT"
+        echo "  健康检查: http://127.0.0.1:$PORT/health"
+        echo "  API文档: http://127.0.0.1:$PORT"
     else
         echo "  访问地址: http://$current_host:$PORT"
         echo "  健康检查: http://$current_host:$PORT/health"
@@ -646,6 +643,9 @@ show_service_info() {
     if [ -n "$ACCESS_TOKEN" ]; then
         echo "  访问TOKEN: $ACCESS_TOKEN"
     fi
+    
+    echo
+    log_warn "提示: 请将'服务器IP'替换为您的实际服务器IP地址"
 }
 
 # 检查服务状态
@@ -745,15 +745,8 @@ show_service_status() {
         
         # 根据监听地址构造健康检查URL
         if [ "$current_host" = "::" ]; then
-            # 先尝试IPv6，再尝试IPv4
-            health_url="http://[::1]:$current_port/health"
-            health_check=$(curl -s --max-time 3 "$health_url" 2>/dev/null)
-            if [ $? -ne 0 ]; then
-                health_url="http://127.0.0.1:$current_port/health"
-                health_check=$(curl -s --max-time 3 "$health_url" 2>/dev/null)
-            fi
-        elif [ "$current_host" = "::1" ]; then
-            health_url="http://[::1]:$current_port/health"
+            # 双栈模式，优先使用IPv4本地地址进行健康检查
+            health_url="http://127.0.0.1:$current_port/health"
             health_check=$(curl -s --max-time 3 "$health_url" 2>/dev/null)
         else
             # IPv4 或具体地址
@@ -1231,66 +1224,35 @@ health_check() {
     fi
     
     if [ -z "$host" ]; then
-        host="0.0.0.0"
+        host="::"
     fi
     
     log_info "执行健康检查..."
     
-    # 构造健康检查URL
-    local health_url=""
-    if [ "$host" = "::" ]; then
-        # 双栈模式，先尝试IPv6
-        health_url="http://[::1]:$port/health"
-        log_info "尝试IPv6连接: $health_url"
-        
-        if curl -f -s "$health_url" > /dev/null 2>&1; then
-            log_success "IPv6健康检查通过"
-        else
-            # IPv6失败，尝试IPv4
-            health_url="http://127.0.0.1:$port/health"
-            log_info "IPv6失败，尝试IPv4连接: $health_url"
-            
-            if curl -f -s "$health_url" > /dev/null 2>&1; then
-                log_success "IPv4健康检查通过"
-            else
-                log_error "IPv4和IPv6健康检查都失败"
-                health_check_failed "$port" "$host"
-                return
-            fi
-        fi
-    elif [ "$host" = "::1" ]; then
-        # 仅IPv6
-        health_url="http://[::1]:$port/health"
-        log_info "尝试IPv6连接: $health_url"
-        
-        if curl -f -s "$health_url" > /dev/null 2>&1; then
-            log_success "IPv6健康检查通过"
-        else
-            log_error "IPv6健康检查失败"
-            health_check_failed "$port" "$host"
-            return
-        fi
-    else
-        # IPv4 或具体地址
-        local test_host="$host"
-        if [ "$host" = "0.0.0.0" ]; then
-            test_host="127.0.0.1"
-        fi
-        health_url="http://$test_host:$port/health"
-        log_info "尝试IPv4连接: $health_url"
-        
-        if curl -f -s "$health_url" > /dev/null 2>&1; then
-            log_success "IPv4健康检查通过"
-        else
-            log_error "IPv4健康检查失败"
-            health_check_failed "$port" "$host"
-            return
-        fi
-    fi
+    # 构造健康检查URL - 统一使用本地IPv4地址进行测试
+    local health_url="http://127.0.0.1:$port/health"
+    log_info "测试地址: $health_url"
     
-    echo
-    log_info "服务响应:"
-    curl -s "$health_url" | python3 -m json.tool 2>/dev/null || curl -s "$health_url"
+    if curl -f -s "$health_url" > /dev/null 2>&1; then
+        log_success "健康检查通过"
+        
+        echo
+        log_info "服务响应:"
+        curl -s "$health_url" | python3 -m json.tool 2>/dev/null || curl -s "$health_url"
+        
+        echo
+        log_info "外部访问地址:"
+        if [ "$host" = "::" ]; then
+            echo "  IPv4: http://服务器IP:$port"
+            echo "  IPv6: http://[服务器IPv6]:$port"
+        else
+            echo "  访问地址: http://服务器IP:$port"
+        fi
+        echo "  提示: 请将'服务器IP'替换为您的实际服务器IP地址"
+    else
+        log_error "健康检查失败"
+        health_check_failed "$port" "$host"
+    fi
     
     echo
     read -p "按Enter键继续..." -r
